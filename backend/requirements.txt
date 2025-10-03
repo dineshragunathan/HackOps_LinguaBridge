@@ -1,0 +1,18 @@
+Flask==3.0.3
+Flask-Cors==5.0.0
+gunicorn==23.0.0
+
+# OpenAI / embeddings
+openai==1.42.0
+
+# Supabase client
+supabase==2.5.0
+
+# OCR + PDF processing
+pdf2image==1.17.0
+pytesseract==0.3.13
+Pillow==10.3.0  # works with Python 3.13
+
+# Utils
+python-dotenv==1.0.1
+requests==2.32.3
