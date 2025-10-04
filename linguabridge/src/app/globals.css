@@ -1,0 +1,51 @@
+@import "tailwindcss";
+/* FILE: styles/globals.css */
+@tailwind utilities;
+
+/* Tokens */
+:root{
+  --bg: hsl(0 0% 100%);
+  --muted: hsl(210 16% 96%);
+  --border: hsl(214 15% 91%);
+  --fg: hsl(222 47% 11%);
+  --fg-muted: hsl(215 16% 27%);
+  --primary: hsl(262 83% 58%);
+  --panel-radius: 12px;
+}
+
+/* Dark theme */
+.dark{
+  --bg: hsl(222 47% 11%);
+  --muted: hsl(214 16% 15%);
+  --border: hsl(215 16% 27%);
+  --fg: hsl(0 0% 100%);
+  --fg-muted: hsl(210 16% 80%);
+  --primary: hsl(262 83% 58%);
+}
+
+html, body, #__next {
+  height: 100%;
+}
+
+/* Utility tweaks */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background-color: rgba(0,0,0,0.12); border-radius: 8px; }
+.dark ::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,0.06); }
+
+/* Small helpers */
+.card {
+  @apply bg-white dark:bg-[color:var(--muted)] rounded-[var(--panel-radius)] shadow-sm;
+}
+
+/* Accessibility focus */
+:focus {
+  outline: 3px solid rgba(99,102,241,0.25);
+  outline-offset: 2px;
+}
+
+/* Force TopBar height */
+header {
+  height: 60px !important;
+  min-height: 60px !important;
+  max-height: 60px !important;
+}

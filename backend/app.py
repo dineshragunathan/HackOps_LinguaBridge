@@ -1,402 +1,583 @@
-import os
 from dotenv import load_dotenv
-from pathlib import Path
+from pathlib import Path as _Path
+load_dotenv(dotenv_path=_Path(__file__).with_name('.env'), override=False)
+
+import os
+import re
 import uuid
+from datetime import datetime
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from pdf2image import convert_from_path
-from pdf2image import pdfinfo_from_path
 import pytesseract
 from fpdf import FPDF
-from PIL import Image, ImageDraw, ImageFont
-from translate import translate_text_to_english
+from translate import translate_text_to_english, generate_chat_response
 from supabase_client import (
     sb_available,
-    insert_documents_row,
-    update_document_status,
-    insert_texts_row,
-    get_texts,
-    insert_chatlog,
+    insert_document,
+    insert_translation,
+    get_translations_for_document,
+    get_document_metadata,
+    get_or_create_chat,
+    insert_message,
+    get_user_documents,
+    get_chat_messages,
+    get_user_chat_for_document,
+    delete_user_document,
 )
-import openai
-
-# ------------------------------
-# Config
-# ------------------------------
-
-# Load environment variables from .env located next to this file (robust when launched from other CWDs)
-_env_path = Path(__file__).with_name('.env')
-load_dotenv(dotenv_path=_env_path, override=False)
-
-UPLOAD_DIR = "tmp_uploads"
-DATA_DIR = "data"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True)
-
-openai.api_key = os.environ.get("OPENAI_API_KEY")
-
-ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
-
-# ------------------------------
-# App init
-# ------------------------------
 
 app = Flask(__name__)
 CORS(app)
 
-# ------------------------------
-# Helpers
-# ------------------------------
+UPLOAD_DIR = "tmp_uploads"
+DATA_DIR = "data"
+ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+
 
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def extract_text_from_image(image_path, lang="nep"):  # nep: Nepali, sin: Sinhala
+
+def detect_document_language(file_path):
     """
-    Try OCR with a sequence of language fallbacks to improve robustness when
-    specific traineddata files are missing. Returns empty string on failure.
+    Detect the primary language of the document by trying different OCR languages
     """
-    # Build a prioritized list of language combinations
-    # Start with requested lang blended with others, then degrade to single langs
+    try:
+        # Try different language combinations and see which gives the best results
+        language_candidates = [
+            ("sin", "sin+eng"),  # Sinhala first
+            ("nep", "nep+eng"),  # Nepali second
+            ("eng", "eng"),      # English last
+        ]
+        
+        best_lang = "nep"  # Default fallback
+        max_text_length = 0
+        
+        for lang_code, lang_string in language_candidates:
+            try:
+                # Quick OCR test with basic config
+                test_text = pytesseract.image_to_string(file_path, lang=lang_string, config="--psm 6")
+                if test_text and test_text.strip():
+                    # Count meaningful characters (not just numbers/symbols)
+                    meaningful_chars = len([c for c in test_text if c.isalpha() or c.isspace()])
+                    if meaningful_chars > max_text_length:
+                        max_text_length = meaningful_chars
+                        best_lang = lang_code
+            except Exception as e:
+                print(f"Language detection failed for {lang_string}: {e}")
+                continue
+        
+        print(f"[language_detection] Detected language: {best_lang} (text length: {max_text_length})")
+        return best_lang
+    except Exception as e:
+        print(f"[language_detection] Error: {e}")
+        return "nep"  # Default fallback
+
+
+def extract_text_from_image(image_path, lang="nep"):
+    """
+    Enhanced OCR text extraction with preprocessing and cleaning
+    """
+    from PIL import Image, ImageEnhance, ImageFilter
+    
+    # First, try to preprocess the image for better OCR
+    try:
+        img = Image.open(image_path)
+        
+        # Convert to grayscale for better OCR
+        if img.mode != 'L':
+            img = img.convert('L')
+        
+        # Enhance contrast
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.5)
+        
+        # Apply slight sharpening
+        img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
+        
+        # Save the preprocessed image temporarily
+        temp_path = image_path.replace('.', '_processed.')
+        img.save(temp_path)
+        processed_image_path = temp_path
+    except Exception as e:
+        print(f"Image preprocessing failed: {e}")
+        processed_image_path = image_path
+    
     requested = lang or "nep"
     candidates = [
         f"{requested}+sin+eng",
-        f"{requested}+eng",
+        f"{requested}+eng", 
         requested,
+        "script/Devanagari+eng",
         "sin+eng",
         "sin",
         "eng",
     ]
-    # Balanced OCR setup for multi-lingual text blocks
-    # Try multiple configs and sources (path, PIL Image)
+    
+    # Improved OCR configurations
     configs = [
         "--oem 1 --psm 6 -c preserve_interword_spaces=1",
-        "--oem 1 --psm 7 -c preserve_interword_spaces=1",
+        "--oem 1 --psm 7 -c preserve_interword_spaces=1", 
         "--oem 3 --psm 6 -c preserve_interword_spaces=1",
+        "--oem 1 --psm 8",  # Single word
+        "--oem 3 --psm 7",   # Single text line
     ]
+
+    best_text = ""
+    max_reasonable_length = 0
+    
     for langs in candidates:
         for cfg in configs:
             try:
-                txt = pytesseract.image_to_string(image_path, lang=langs, config=cfg)
+                txt = pytesseract.image_to_string(processed_image_path, lang=langs, config=cfg)
                 if txt and txt.strip():
-                    return txt
-            except Exception:
+                    cleaned_txt = clean_ocr_text(txt, target_lang=requested)
+                    # Prefer longer, more reasonable text
+                    if len(cleaned_txt.strip()) > max_reasonable_length and is_reasonable_ocr_output(cleaned_txt, target_lang=requested):
+                        best_text = cleaned_txt
+                        max_reasonable_length = len(cleaned_txt.strip())
+            except Exception as e:
+                print(f"OCR failed with {langs}, {cfg}: {e}")
                 pass
-            try:
-                from PIL import Image as _PILImage
-                img = _PILImage.open(image_path)
-                txt = pytesseract.image_to_string(img, lang=langs, config=cfg)
-                if txt and txt.strip():
-                    return txt
-            except Exception:
-                pass
-    return ""
+    
+    # Clean up temp file
+    try:
+        if processed_image_path != image_path:
+            os.unlink(processed_image_path)
+    except Exception:
+        pass
+        
+    return best_text
 
 
-def _clean_ocr_text(text: str) -> str:
+def clean_ocr_text(text, target_lang="nep"):
     """
-    Normalize OCR text to reduce spurious symbols before translation.
-    - Unicode normalize (NFKC)
-    - Remove control chars (except newlines and tabs)
-    - Replace common replacement chars
-    - Collapse excessive whitespace
+    Clean OCR output by removing unwanted characters and artifacts
     """
-    import unicodedata, re
-    if not text:
-        return ""
-    norm = unicodedata.normalize("NFKC", text)
-    # Remove control chars except \n and \t
-    norm = "".join(ch for ch in norm if ch == "\n" or ch == "\t" or (ord(ch) >= 32 and ch != 0xFFFD))
-    # Replace unknown boxes or stray artifacts
-    norm = norm.replace("\uFFFD", "").replace("□", "").replace("�", "")
-    # Collapse whitespace
-    norm = re.sub(r"[\t ]+", " ", norm)
-    norm = re.sub(r"\s*\n\s*", "\n", norm)
-    return norm.strip()
-
-
-def _filter_to_scripts(text: str, langs: str) -> str:
-    """
-    Remove characters outside expected scripts for the chosen languages.
-    - For Nepali: keep Devanagari U+0900–U+097F plus punctuation and ascii spaces
-    - For Sinhala: keep Sinhala U+0D80–U+0DFF
-    """
-    import re
-    if not text:
-        return ""
-    keep_patterns = []
-    if "nep" in (langs or ""):
-        keep_patterns.append("\u0900-\u097F")
-    if "sin" in (langs or ""):
-        keep_patterns.append("\u0D80-\u0DFF")
-    # Always allow ASCII basic punctuation and spaces
-    keep_class = "".join(keep_patterns)
-    if keep_class:
-        regex = rf"[^\n\t\r\u200c\u200d\u0964\u0965\u2013\u2014\u2018\u2019\u201c\u201d\.,;:!\?\-\(\)\[\]{{}}\/'\"\s{keep_class}]"
-        return re.sub(regex, "", text)
+    
+    # Remove common OCR artifacts
+    text = re.sub(r'[^\w\s\u0900-\u097F\u0D80-\u0DFF\n।॥]', '', text)  # Keep Nepali Devanagari and Sinhala ranges
+    
+    # Remove standalone English words that are likely OCR errors
+    if target_lang in ["nep", "nepali"]:
+        # Split into lines and clean each line
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # If line contains mostly English words (excluding Devanagari), skip simple English words
+            devanagari_chars = re.findall(r'[\u0900-\u097F]', line)
+            if len(devanagari_chars) == 0:
+                # If no Devanagari characters, this might be OCR noise
+                if len(line.strip().split()) <= 2:  # Skip short English-only lines
+                    continue
+            
+            # Remove standalone English words that are likely OCR errors
+            words = line.split()
+            filtered_words = []
+            for word in words:
+                devanagari_in_word = re.findall(r'[\u0900-\u097F]', word)
+                english_in_word = re.findall(r'[a-zA-Z]', word)
+                
+                # Skip standalone English words that are likely OCR errors
+                if not devanagari_in_word and english_in_word:
+                    # Skip common OCR noise words
+                    noise_words = ['jey', 've', 'je', 'ye', 'the', 'and', 'or', 'is', 'be']
+                    if word.lower() in noise_words:
+                        continue
+                    # Skip short English-only words (likely OCR errors)
+                    if len(word) <= 3:
+                        continue
+                
+                filtered_words.append(word)
+            
+            cleaned_line = ' '.join(filtered_words)
+            if cleaned_line.strip():
+                cleaned_lines.append(cleaned_line)
+        
+        return '\n'.join(cleaned_lines)
+    
+    elif target_lang in ["sin", "sinhala"]:
+        # Sinhala-specific cleaning
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # If line contains mostly English words (excluding Sinhala), skip simple English words
+            sinhala_chars = re.findall(r'[\u0D80-\u0DFF]', line)
+            if len(sinhala_chars) == 0:
+                # If no Sinhala characters, this might be OCR noise
+                if len(line.strip().split()) <= 2:  # Skip short English-only lines
+                    continue
+            
+            # Remove standalone English words that are likely OCR errors
+            words = line.split()
+            filtered_words = []
+            for word in words:
+                sinhala_in_word = re.findall(r'[\u0D80-\u0DFF]', word)
+                english_in_word = re.findall(r'[a-zA-Z]', word)
+                
+                # Skip standalone English words that are likely OCR errors
+                if not sinhala_in_word and english_in_word:
+                    # Skip common OCR noise words
+                    noise_words = ['jey', 've', 'je', 'ye', 'the', 'and', 'or', 'is', 'be']
+                    if word.lower() in noise_words:
+                        continue
+                    # Skip short English-only words (likely OCR errors)
+                    if len(word) <= 3:
+                        continue
+                
+                filtered_words.append(word)
+            
+            cleaned_line = ' '.join(filtered_words)
+            if cleaned_line.strip():
+                cleaned_lines.append(cleaned_line)
+        
+        return '\n'.join(cleaned_lines)
+    
     return text
 
-def translate_text(text, target="en"):
-    """Translate using OpenAI API (prototype)"""
-    return translate_text_to_english(text)
 
-def _render_text_pages_with_pillow(text: str, page_width=1240, page_height=1754, margin=60, font_size=28):
-    lines = []
-    for raw_line in (text or "").split("\n"):
-        lines.append(raw_line if raw_line else " ")
-
-    font_candidates = [
-        "/System/Library/Fonts/DevanagariMT.ttc",  
-        "/System/Library/Fonts/Supplemental/NotoSansDevanagari.ttc",
-        "/System/Library/Fonts/Supplemental/NotoSansSinhala.ttc",
-        "/System/Library/Fonts/Supplemental/Sinhala Sangam MN.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    ]
-    font = None
-    for path in font_candidates:
-        try:
-            font = ImageFont.truetype(path, font_size)
-            break
-        except Exception:
-            continue
-    if font is None:
-        font = ImageFont.load_default()
-
-    images = []
-    img = Image.new("RGB", (page_width, page_height), "white")
-    draw = ImageDraw.Draw(img)
-    x = margin
-    y = margin
-    line_spacing = int(font_size * 1.4)
-    max_width = page_width - 2 * margin
-
-    def flush_page(curr_img):
-        nonlocal images
-        images.append(curr_img)
-
-    for line in lines:
-        # naive wrap by words
-        words = line.split(" ")
-        current = ""
-        for word in words:
-            trial = (current + (" " if current else "") + word).strip()
-            w, h = draw.textbbox((0, 0), trial, font=font)[2:]
-            if w <= max_width:
-                current = trial
-            else:
-                if y + line_spacing > page_height - margin:
-                    flush_page(img)
-                    img = Image.new("RGB", (page_width, page_height), "white")
-                    draw = ImageDraw.Draw(img)
-                    y = margin
-                draw.text((x, y), current, fill=(0, 0, 0), font=font)
-                y += line_spacing
-                current = word
-        if current != "":
-            if y + line_spacing > page_height - margin:
-                flush_page(img)
-                img = Image.new("RGB", (page_width, page_height), "white")
-                draw = ImageDraw.Draw(img)
-                y = margin
-            draw.text((x, y), current, fill=(0, 0, 0), font=font)
-            y += line_spacing
-
-    flush_page(img)
-    return images
+def is_reasonable_ocr_output(text, target_lang="nep"):
+    """
+    Check if OCR output looks reasonable for the target language
+    """
+    if target_lang in ["nep", "nepali"]:
+        # Should contain Devanagari characters
+        devanagari_chars = re.findall(r'[\u0900-\u097F]', text)
+        return len(devanagari_chars) > 0
+    elif target_lang in ["sin", "sinhala"]:
+        # Should contain Sinhala characters
+        sinhala_chars = re.findall(r'[\u0D80-\u0DFF]', text)
+        return len(sinhala_chars) > 0
+    
+    return True
 
 
-def text_to_pdf(text, output_path):
-    try:
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.set_font("Arial", size=12)
-        for line in (text or "").split("\n"):
-            pdf.multi_cell(0, 5, line)
-        pdf.output(output_path)
-    except UnicodeEncodeError:
-        # Fallback: render text onto images with a unicode-capable font and save as PDF
-        images = _render_text_pages_with_pillow(text)
-        if images:
-            images[0].save(output_path, save_all=True, append_images=images[1:], format="PDF")
-        else:
-            # Create a blank PDF page if no content
-            blank = Image.new("RGB", (1240, 1754), "white")
-            blank.save(output_path, format="PDF")
+def text_to_pdf(text, output_path, font_path):
+    pdf = FPDF()
+    pdf.add_page()
+    if font_path and os.path.exists(font_path):
+        pdf.add_font("CustomFont", "", font_path)
+        pdf.set_font("CustomFont", size=14)
+    else:
+        # Use default font (Arial)
+        pdf.set_font("Arial", size=14)
+    usable_width = pdf.w - 2 * pdf.l_margin
+    for line in text.split("\n"):
+        pdf.multi_cell(usable_width, 10, line if line.strip() else " ")
+    pdf.output(output_path)
 
-# ------------------------------
-# Routes
-# ------------------------------
 
 @app.route("/upload", methods=["POST"])
 def upload_file():
+    user_id = request.form.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Missing user ID"}), 400
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
-
     file = request.files["file"]
-    if file.filename == "" or not allowed_file(file.filename):
+    if not file or file.filename == "" or not allowed_file(file.filename):
         return jsonify({"error": "Invalid file"}), 400
 
     filename = secure_filename(file.filename)
     doc_id = str(uuid.uuid4())
     ext = filename.rsplit(".", 1)[1].lower()
-    tmp_path = os.path.join(UPLOAD_DIR, f"{doc_id}.{ext}")
-    file.save(tmp_path)
+    file_path = os.path.join(UPLOAD_DIR, f"{doc_id}.{ext}")
+    file.save(file_path)
 
-    # Supabase: insert initial document row (status=pending)
-    if sb_available:
-        try:
-            insert_documents_row(document_id=doc_id, user_id=None, filename=filename, file_type=ext if ext in ["pdf","png","jpg","jpeg"] else "unknown", status="pending")
-        except Exception as e:
-            print("[supabase] insert_documents_row failed:", e)
+    page_count = 1
+    
+    # Detect the document language
+    detected_lang = detect_document_language(file_path)
+    language = detected_lang
 
-    # OCR & Translation
+    native_texts = []
+    translated_texts = []
+
     if ext in ["png", "jpg", "jpeg"]:
-        # Image: attempt robust OCR; if empty, try with English fallback
-        native_text = extract_text_from_image(tmp_path, lang="nep")  # Adjust lang dynamically
-        if not native_text or not native_text.strip():
-            native_text = extract_text_from_image(tmp_path, lang="nep+eng") or ""
-    else:  # PDF
+        # Use detected language for OCR
+        native_text = extract_text_from_image(file_path, lang=detected_lang)
+        if not native_text.strip():
+            # Fallback to mixed language OCR
+            native_text = extract_text_from_image(file_path, lang=f"{detected_lang}+eng") or ""
+        native_texts.append(native_text)
+        translated = translate_text_to_english(native_text)
+        translated_texts.append(translated)
+        native_pdf_path = None
+        english_pdf_path = None
+    else:
         try:
-            images = convert_from_path(tmp_path)
+            images = convert_from_path(file_path)
+            page_count = len(images)
         except Exception as e:
-            return jsonify({
-                "error": "Failed to process PDF. Ensure Poppler is installed (pdftoppm) and the PDF is valid.",
-                "details": str(e)
-            }), 500
-        native_text = ""
-        ocr_config = "--oem 1 --psm 6 -c preserve_interword_spaces=1"
+            return jsonify({"error": "PDF processing failed", "details": str(e)}), 500
         for img in images:
-            try:
-                # Reuse same fallback strategy by saving to a temp image if needed
-                txt = pytesseract.image_to_string(img, lang="nep+sin+eng", config=ocr_config)
-                native_text += _filter_to_scripts(txt, "nep+sin") + "\n"
-            except pytesseract.TesseractError:
-                try:
-                    txt = pytesseract.image_to_string(img, lang="eng", config=ocr_config)
-                    native_text += txt + "\n"
-                except Exception:
-                    continue
-
-    # If OpenAI key missing, skip translation gracefully
-    english_text = None
-    try:
-        if openai.api_key:
-            cleaned = _clean_ocr_text(_filter_to_scripts(native_text, "nep+sin"))
-            english_text = translate_text(cleaned)
-    except Exception:
-        english_text = None
-
-    # Save PDFs
-    native_pdf = os.path.join(DATA_DIR, f"{doc_id}_native.pdf")
-    english_pdf = os.path.join(DATA_DIR, f"{doc_id}_english.pdf")
-    text_to_pdf(native_text, native_pdf)
-    # Write english PDF if we have any translation result; allow same-text for now to verify pipeline
-    if english_text and english_text.strip():
-        text_to_pdf(english_text, english_pdf)
-
-    # Supabase: store texts and mark document completed
-    if sb_available:
+            # Use enhanced OCR extraction for PDF pages too
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                img.save(tmp_file.name)
+                text = extract_text_from_image(tmp_file.name, lang=detected_lang)
+                os.unlink(tmp_file.name)
+            native_texts.append(text)
+            translated_texts.append(translate_text_to_english(text))
+        native_pdf_font = "NotoSansDevanagari-Regular.ttf"
+        english_pdf_font = ""  # Use default font for English
+        native_pdf_path = os.path.join(DATA_DIR, f"{doc_id}_native.pdf")
+        english_pdf_path = os.path.join(DATA_DIR, f"{doc_id}_english.pdf")
+        all_native_text = "\n\n".join(native_texts)
+        all_translated_text = "\n\n".join(translated_texts)
         try:
-            insert_texts_row(document_id=doc_id, native_text=native_text or "", translated_text=english_text or "")
-            update_document_status(document_id=doc_id, status="completed")
+            text_to_pdf(all_native_text, native_pdf_path, native_pdf_font)
+            if any(t.strip() for t in translated_texts):
+                text_to_pdf(all_translated_text, english_pdf_path, english_pdf_font)
         except Exception as e:
-            print("[supabase] texts/status upsert failed:", e)
-            try:
-                update_document_status(document_id=doc_id, status="failed")
-            except Exception as e2:
-                print("[supabase] status update failed:", e2)
+            return jsonify({"error": "Internal error generating PDF", "details": str(e)}), 500
+
+    file_url = f"{doc_id}.{ext}" if ext in ["png", "jpg", "jpeg"] else f"{doc_id}_native.pdf"
+
+    if sb_available():
+        insert_document(document_id=doc_id, user_id=user_id, title=filename, file_url=file_url,
+                        language=language, page_count=page_count)
+        for i, (orig, trans) in enumerate(zip(native_texts, translated_texts), start=1):
+            insert_translation(document_id=doc_id, original_text=orig or "", translated_text=trans or "", page_number=i)
 
     return jsonify({
         "documentId": doc_id,
         "filename": filename,
-        "numPages": 1  # Simplified; could count pages from PDF
+        "numPages": page_count,
+        "native_pdf_path": native_pdf_path,
+        "english_pdf_path": english_pdf_path,
+        "file_ext": ext,
     })
+
 
 @app.route("/file/<document_id>")
 def get_file(document_id):
     lang = request.args.get("lang", "native")
-    pdf_path = os.path.join(DATA_DIR, f"{document_id}_{lang}.pdf")
-    if not os.path.exists(pdf_path):
-        return jsonify({"error": "File not found"}), 404
-    # Enable byte-range requests for PDF.js by using conditional responses
-    return send_file(
-        pdf_path,
-        mimetype="application/pdf",
-        as_attachment=False,
-        conditional=True,
-        etag=True
-    )
+    potential_pdf_path = os.path.join(DATA_DIR, f"{document_id}_{lang}.pdf")
+    potential_img_extensions = ['png', 'jpg', 'jpeg']
+    for ext in potential_img_extensions:
+        potential_img_path = os.path.join(UPLOAD_DIR, f"{document_id}.{ext}")
+        if os.path.exists(potential_img_path):
+            return send_file(potential_img_path, mimetype=f"image/{ext}", as_attachment=False)
+    if os.path.exists(potential_pdf_path):
+        return send_file(potential_pdf_path, mimetype="application/pdf", as_attachment=False)
+    return jsonify({"error": "File not found"}), 404
 
 
 @app.route("/metadata/<document_id>")
 def get_metadata(document_id):
-    """
-    Return basic metadata for a document, including number of pages for the
-    native PDF if available and which variants exist.
-    """
-    native_pdf = os.path.join(DATA_DIR, f"{document_id}_native.pdf")
-    english_pdf = os.path.join(DATA_DIR, f"{document_id}_english.pdf")
-
-    if not os.path.exists(native_pdf) and not os.path.exists(english_pdf):
+    if not sb_available():
+        return jsonify({"error": "Supabase not configured"}), 500
+    translations = get_translations_for_document(document_id)
+    doc_meta = get_document_metadata(document_id)
+    if not doc_meta:
         return jsonify({"error": "Document not found"}), 404
-
-    num_pages = None
-    try:
-        target_pdf = native_pdf if os.path.exists(native_pdf) else english_pdf
-        info = pdfinfo_from_path(target_pdf, userpw=None, poppler_path=None)
-        # pdfinfo_from_path returns a dict; 'Pages' key is int
-        num_pages = info.get("Pages")
-    except Exception:
-        # If pdfinfo is unavailable, leave num_pages as None
-        pass
-
+    native_text = "\n\n".join(t["original_text"] for t in translations if t["original_text"])
+    translated_text = "\n\n".join(t["translated_text"] for t in translations if t["translated_text"])
     return jsonify({
-        "documentId": document_id,
-        "numPages": num_pages,
-        "variants": {
-            "native": os.path.exists(native_pdf),
-            "english": os.path.exists(english_pdf),
-        }
+        "filename": doc_meta["title"],
+        "fileExt": doc_meta["file_url"].split(".")[-1].lower(),
+        "nativeText": native_text,
+        "translatedText": translated_text
     })
+
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    data = request.json
+    data = request.json or {}
     document_id = data.get("documentId")
-    message = data.get("message")
-    mode = data.get("mode", "fast")
-
-    # Fetch document text from Supabase if available, else fallback to native PDF text file (not implemented)
-    source_texts = None
-    if sb_available and document_id:
+    user_id = data.get("userId")
+    message = data.get("message", "").strip()
+    if not document_id or not user_id or not message:
+        return jsonify({"error": "Missing required fields"}), 400
+    if not sb_available():
+        return jsonify({"error": "Supabase not configured"}), 500
+    
+    try:
+        print(f"[chat] Received request: doc={document_id}, user={user_id}, msg={message}")
+        
+        # Get document context from Supabase
+        translations = get_translations_for_document(document_id)
+        doc_meta = get_document_metadata(document_id)
+        
+        print(f"[chat] Document metadata: {doc_meta}")
+        print(f"[chat] Translations count: {len(translations) if translations else 0}")
+        
+        if not translations:
+            assistant_reply = "Sorry, I don't have access to the document content. Please make sure the document was processed successfully."
+        else:
+            # Prepare document context for AI
+            context_parts = []
+            native_context = " ".join([t["original_text"] for t in translations if t["original_text"]])
+            translated_context = " ".join([t["translated_text"] for t in translations if t["translated_text"]])
+            
+            if native_context:
+                context_parts.append(f"Original text: {native_context[:2000]}")
+            if translated_context:
+                context_parts.append(f"English translation: {translated_context[:2000]}")
+            
+            document_context = "\n\n".join(context_parts)
+            
+            print(f"[chat] Generated context length: {len(document_context)}")
+            
+            # Generate intelligent response using OpenAI
+            assistant_reply = generate_chat_response(message, document_context)
+        
+        print(f"[chat] Generated response: {assistant_reply[:100]}...")
+        
+        # Save messages to Supabase
         try:
-            source_texts = get_texts(document_id)
-        except Exception:
-            source_texts = None
+            # Get or create chat for this user and document
+            chat_id = get_or_create_chat(document_id, user_id)
+            if chat_id:
+                # Save user message
+                insert_message(chat_id, "user", message)
+                # Save assistant reply
+                insert_message(chat_id, "assistant", assistant_reply)
+                print(f"[chat] Saved messages to Supabase for chat_id={chat_id}")
+            else:
+                print(f"[chat] Failed to create/get chat for user={user_id}, doc={document_id}")
+        except Exception as save_error:
+            print(f"[chat] Error saving messages: {save_error}")
+        
+        return jsonify({"reply": assistant_reply})
+    except Exception as e:
+        print(f"Chat error: {e}")
+        return jsonify({"error": "Internal error processing chat", "details": str(e)}), 500
 
-    native_text = source_texts.get("native_text") if source_texts else ""
-    translated_text = source_texts.get("translated_text") if source_texts else ""
 
-    # Compose a simple bilingual response using translated text as primary context
-    context = translated_text or native_text or ""
-    if not context:
-        return jsonify({"error": "No text found for this document"}), 404
+@app.route("/user/documents", methods=["GET"])
+def get_user_documents_endpoint():
+    """Get all documents for a specific user"""
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return jsonify({"error": "user_id parameter required"}), 400
+    
+    if not sb_available():
+        return jsonify({"error": "Supabase not configured"}), 500
+    
+    try:
+        documents = get_user_documents(user_id)
+        return jsonify({"documents": documents})
+    except Exception as e:
+        print(f"Get user documents error: {e}")
+        return jsonify({"error": "Failed to fetch user documents", "details": str(e)}), 500
 
-    reply = f"Here is a brief answer based on the document (EN):\n\n{context[:500]}\n\nYour question: {message}"
 
-    if sb_available:
+@app.route("/user/chat/<document_id>", methods=["GET"])
+def get_user_chat_endpoint(document_id):
+    """Get chat messages for a user's document"""
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return jsonify({"error": "user_id parameter required"}), 400
+    
+    if not sb_available():
+        return jsonify({"error": "Supabase not configured"}), 500
+    
+    try:
+        # Get chat ID for this user and document
+        chat_id = get_user_chat_for_document(user_id, document_id)
+        if not chat_id:
+            print(f"[chat] No chat found for user={user_id}, doc={document_id}")
+            return jsonify({"chat_id": None, "messages": []})
+        
+        # Get messages for this chat
+        messages = get_chat_messages(chat_id)
+        print(f"[chat] Returning {len(messages)} messages for user={user_id}, doc={document_id}, chat_id={chat_id}")
+        return jsonify({"chat_id": chat_id, "messages": messages})
+    except Exception as e:
+        print(f"Get user chat error: {e}")
+        return jsonify({"error": "Failed to fetch chat messages", "details": str(e)}), 500
+
+
+@app.route("/user/chat/<document_id>/message", methods=["POST"])
+def save_user_message_endpoint(document_id):
+    """Save a chat message for a user's document"""
+    data = request.json or {}
+    user_id = data.get("user_id")
+    role = data.get("role")  # "user" or "assistant"
+    content = data.get("content")
+    
+    if not user_id or not role or not content:
+        return jsonify({"error": "user_id, role, and content required"}), 400
+    
+    if not sb_available():
+        return jsonify({"error": "Supabase not configured"}), 500
+    
+    try:
+        # Get or create chat for this user and document
+        chat_id = get_user_chat_for_document(user_id, document_id)
+        if not chat_id:
+            return jsonify({"error": "Failed to get/create chat"}), 500
+        
+        # Save the message
+        result = insert_message(chat_id, role, content)
+        if result:
+            return jsonify({"success": True, "message_id": result[0].get("id") if result else None})
+        else:
+            return jsonify({"error": "Failed to save message"}), 500
+    except Exception as e:
+        print(f"Save user message error: {e}")
+        return jsonify({"error": "Failed to save message", "details": str(e)}), 500
+
+
+@app.route("/user/documents/<document_id>", methods=["DELETE"])
+def delete_user_document_endpoint(document_id):
+    """Delete a user's document and all related data"""
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return jsonify({"error": "user_id parameter required"}), 400
+    
+    if not sb_available():
+        return jsonify({"error": "Supabase not configured"}), 500
+    
+    try:
+        print(f"[delete] Deleting document {document_id} for user {user_id}")
+        
+        # Delete from database
+        success = delete_user_document(user_id, document_id)
+        
+        if not success:
+            return jsonify({"error": "Failed to delete document or document not found"}), 404
+        
+        # Also delete the actual files from the filesystem
         try:
-            insert_chatlog(user_id=None, document_id=document_id, message=message or "", response=reply)
-        except Exception as e:
-            print("[supabase] chatlog insert failed:", e)
+            import os
+            import glob
+            
+            # Delete original uploaded file
+            upload_pattern = os.path.join(UPLOAD_DIR, f"{document_id}.*")
+            for file_path in glob.glob(upload_pattern):
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"[delete] Deleted uploaded file: {file_path}")
+            
+            # Delete generated PDF files
+            pdf_patterns = [
+                os.path.join(DATA_DIR, f"{document_id}_native.pdf"),
+                os.path.join(DATA_DIR, f"{document_id}_english.pdf"),
+            ]
+            
+            for pdf_path in pdf_patterns:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                    print(f"[delete] Deleted PDF file: {pdf_path}")
+                    
+        except Exception as file_error:
+            print(f"[delete] File deletion warning: {file_error}")
+            # Don't fail the request if file deletion fails
+        
+        return jsonify({"success": True, "message": "Document deleted successfully"})
+        
+    except Exception as e:
+        print(f"Delete document error: {e}")
+        return jsonify({"error": "Failed to delete document", "details": str(e)}), 500
 
-    return jsonify({"reply": reply})
-
-# ------------------------------
-# Main
-# ------------------------------
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
