@@ -25,6 +25,8 @@ export default function Home() {
   const [zoom, setZoom] = useState(1);
   const [viewLang, setViewLang] = useState("native");
   const [userDocuments, setUserDocuments] = useState([]);
+  const [processingDocuments, setProcessingDocuments] = useState(new Set());
+  const [isSwitchingDocument, setIsSwitchingDocument] = useState(false);
   const { user, loading: authLoading } = useUser();
   const router = useRouter();
 
@@ -39,6 +41,9 @@ export default function Home() {
       const response = await fetch(`${BACKEND}/metadata/${docId}`);
       if (response.ok) {
         const metadata = await response.json();
+        console.log("[Frontend] Fetched metadata for document:", docId);
+        console.log("[Frontend] Translated text length:", metadata.translatedText?.length || 0);
+        console.log("[Frontend] First 200 chars:", metadata.translatedText?.substring(0, 200) || "");
         setFileExt(metadata.fileExt || "pdf");
         setNativeText(metadata.nativeText || "");
         setTranslatedText(metadata.translatedText || "");
@@ -131,12 +136,39 @@ export default function Home() {
         <TopBar
           viewLang={viewLang}
           setViewLang={setViewLang}
+          documentId={documentId}
+          translatedText={translatedText}
+          onUploadStart={(file) => {
+            // Generate a temporary document ID for processing state
+            const tempDocId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            setProcessingDocuments(prev => new Set([...prev, tempDocId]));
+            
+            // Set temporary document info and clear previous content
+            setDocumentId(tempDocId);
+            setFilename(file.name);
+            setFileExt(file.name.split('.').pop() || 'pdf');
+            setNativeText("");
+            setTranslatedText("");
+          }}
           onUploadComplete={async (meta) => {
             const docId = meta.documentId || meta.id || meta.name;
             
             // Only proceed if we have a valid document ID
             if (docId && docId !== 'undefined') {
+              // Remove any temporary processing states
+              setProcessingDocuments(prev => {
+                const newSet = new Set(prev);
+                // Remove all temp IDs
+                Array.from(newSet).forEach(id => {
+                  if (id.startsWith('temp-')) {
+                    newSet.delete(id);
+                  }
+                });
+                return newSet;
+              });
+              
               setDocumentId(docId);
+              setFileExt(meta.file_ext || "pdf");
               setFilename(meta.filename || meta.name || "Document");
               setPageNumber(1);
               setZoom(1);
@@ -148,21 +180,48 @@ export default function Home() {
               await fetchUserDocuments();
             } else {
               console.error("Upload completed but no valid document ID received:", meta);
+              // Remove temporary processing state on error
+              setProcessingDocuments(prev => {
+                const newSet = new Set(prev);
+                Array.from(newSet).forEach(id => {
+                  if (id.startsWith('temp-')) {
+                    newSet.delete(id);
+                  }
+                });
+                return newSet;
+              });
             }
           }}
         />
       </div>
       <div className="flex flex-1 overflow-hidden">
-        <aside className="hidden lg:flex w-[280px] flex-shrink-0 border-r border-[var(--border)] bg-[var(--muted)]">
+        <aside className="hidden lg:flex w-[280px] flex-shrink-0">
           <Sidebar 
             currentFileName={filename} 
             userDocuments={userDocuments}
+            processingDocuments={processingDocuments}
             onDocumentSelect={async (doc) => {
+              // Add loading state to prevent scaling issues
+              setIsSwitchingDocument(true);
+              
+              // Clear previous document data first
+              setNativeText("");
+              setTranslatedText("");
+              
               setDocumentId(doc.document_id);
               setFilename(doc.title);
               setPageNumber(1);
               setZoom(1);
-              await fetchDocumentMetadata(doc.document_id);
+              
+              // Only fetch metadata for real documents, not temporary ones
+              if (!doc.document_id.startsWith('temp-')) {
+                await fetchDocumentMetadata(doc.document_id);
+              }
+              
+              // Remove loading state after a brief delay
+              setTimeout(() => {
+                setIsSwitchingDocument(false);
+              }, 100);
             }}
             onDocumentDelete={deleteUserDocument}
           />
@@ -182,9 +241,10 @@ export default function Home() {
             setNumPages={setNumPages}
             zoom={zoom}
             setZoom={setZoom}
+            isSwitchingDocument={isSwitchingDocument}
           />
         </main>
-        <aside className="hidden lg:flex w-[360px] xl:w-[420px] flex-shrink-0 border-l border-[var(--border)] bg-[var(--muted)] overflow-hidden">
+        <aside className="hidden lg:flex w-[360px] xl:w-[420px] flex-shrink-0 border-l border-gray-200 dark:border-gray-700 overflow-hidden">
           <ChatPanel documentId={documentId} />
         </aside>
       </div>

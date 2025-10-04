@@ -2,15 +2,24 @@
 /* FILE: styles/globals.css */
 @tailwind utilities;
 
-/* Tokens */
+/* Clean Design Tokens */
 :root{
   --bg: hsl(0 0% 100%);
-  --muted: hsl(210 16% 96%);
-  --border: hsl(214 15% 91%);
+  --muted: hsl(210 20% 98%);
+  --border: hsl(214 20% 89%);
   --fg: hsl(222 47% 11%);
   --fg-muted: hsl(215 16% 27%);
-  --primary: hsl(262 83% 58%);
-  --panel-radius: 12px;
+  --primary: hsl(214 100% 50%);
+  --primary-hover: hsl(214 100% 45%);
+  --secondary: hsl(210 40% 98%);
+  --accent: hsl(210 100% 50%);
+  --success: hsl(142 76% 36%);
+  --warning: hsl(38 92% 50%);
+  --error: hsl(0 84% 60%);
+  --panel-radius: 8px;
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
 }
 
 /* Dark theme */
@@ -20,26 +29,82 @@
   --border: hsl(215 16% 27%);
   --fg: hsl(0 0% 100%);
   --fg-muted: hsl(210 16% 80%);
-  --primary: hsl(262 83% 58%);
+  --primary: hsl(214 100% 60%);
+  --primary-hover: hsl(214 100% 65%);
+  --secondary: hsl(214 16% 20%);
+  --accent: hsl(210 100% 60%);
+  --success: hsl(142 76% 46%);
+  --warning: hsl(38 92% 60%);
+  --error: hsl(0 84% 70%);
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.3), 0 2px 4px -2px rgb(0 0 0 / 0.3);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3), 0 4px 6px -4px rgb(0 0 0 / 0.3);
 }
 
 html, body, #__next {
   height: 100%;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
-/* Utility tweaks */
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background-color: rgba(0,0,0,0.12); border-radius: 8px; }
-.dark ::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,0.06); }
+/* Clean Scrollbars */
+::-webkit-scrollbar { 
+  width: 8px; 
+  height: 8px; 
+}
+::-webkit-scrollbar-track { 
+  background: transparent; 
+}
+::-webkit-scrollbar-thumb { 
+  background: #d1d5db;
+  border-radius: 4px;
+  transition: background 0.2s ease;
+}
+::-webkit-scrollbar-thumb:hover { 
+  background: #9ca3af;
+}
+.dark ::-webkit-scrollbar-thumb { 
+  background: #4b5563;
+}
+.dark ::-webkit-scrollbar-thumb:hover { 
+  background: #6b7280;
+}
 
-/* Small helpers */
+/* Simple Card Components */
 .card {
-  @apply bg-white dark:bg-[color:var(--muted)] rounded-[var(--panel-radius)] shadow-sm;
+  @apply bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700;
+  transition: box-shadow 0.2s ease;
 }
 
-/* Accessibility focus */
+.card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+/* Clean Button Styles */
+.btn-primary {
+  @apply px-4 py-2 rounded-lg font-medium text-white bg-blue-600 hover:bg-blue-700;
+  transition: background-color 0.2s ease;
+}
+
+.btn-secondary {
+  @apply px-4 py-2 rounded-lg font-medium bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100 hover:bg-gray-200 dark:hover:bg-gray-600;
+  transition: background-color 0.2s ease;
+}
+
+/* Clean Input Styles */
+.input-modern {
+  @apply px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.input-modern:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  outline: none;
+}
+
+/* Accessibility Focus */
 :focus {
-  outline: 3px solid rgba(99,102,241,0.25);
+  outline: 2px solid #3b82f6;
   outline-offset: 2px;
 }
 

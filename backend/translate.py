@@ -17,10 +17,16 @@ def translate_text_to_english(source_text: str, max_tokens: int = 1200, model: s
         return ""
 
     prompt = (
-        "You are an expert translator. Input is text extracted from a scanned document "
-        "in Nepali or Sinhala or both. The text may contain OCR noise. "
-        "Produce a clean English translation preserving meaning. Return only the translation text.\n\n"
-        f"---\n\n{source_text[:16000]}\n\n---\n\nTranslate above to English:"
+        "You are an expert translator specializing in OCR text correction and translation. "
+        "Input is text extracted from scanned documents in Nepali or Sinhala (or both). "
+        "The text may contain OCR noise, repeated characters, or garbled text. "
+        "Your task:\n"
+        "1. First, clean and correct any obvious OCR errors\n"
+        "2. Then translate the corrected text to clear, natural English\n"
+        "3. Preserve the original meaning and context\n"
+        "4. Return ONLY the final English translation\n\n"
+        f"OCR Text to translate:\n---\n{source_text[:16000]}\n---\n\n"
+        "Provide clean English translation:"
     )
 
     client = _get_openai_client()

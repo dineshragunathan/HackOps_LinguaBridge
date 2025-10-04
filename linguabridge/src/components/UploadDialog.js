@@ -8,9 +8,8 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 );
 
-export default function UploadDialog({ open, onClose, onUploaded }) {
+export default function UploadDialog({ open, onClose, onUploaded, onUploadStart }) {
   const inputRef = useRef(null);
-  const [loading, setLoading] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [dragover, setDragover] = useState({
     isDragging: false,
@@ -29,7 +28,7 @@ export default function UploadDialog({ open, onClose, onUploaded }) {
     e.preventDefault();
     const file = selectedFile || inputRef.current?.files?.[0];
     if (!file) return alert("Pick a file first");
-    setLoading(true);
+    
     try {
       const {
         data: { session },
@@ -38,15 +37,23 @@ export default function UploadDialog({ open, onClose, onUploaded }) {
 
       if (sessionError || !session?.user) {
         alert("You must be logged in to upload files.");
-        setLoading(false);
         return;
       }
 
+      // Close dialog immediately and start processing in background
       const userId = session.user.id;
       const fd = new FormData();
       fd.append("file", file);
       fd.append("user_id", userId);
 
+      // Close dialog and show processing state
+      setSelectedFile(null);
+      onClose();
+      
+      // Notify parent that upload is starting
+      onUploadStart && onUploadStart(file);
+      
+      // Start upload in background
       const res = await fetch(`${BACKEND}/upload`, { method: "POST", body: fd });
       
       if (!res.ok) {
@@ -65,13 +72,11 @@ export default function UploadDialog({ open, onClose, onUploaded }) {
         return;
       }
       
-      setSelectedFile(null); // Clear selected file after upload
+      // Notify parent component that upload completed
       onUploaded && onUploaded(json);
     } catch (err) {
       console.error("Upload error:", err);
       alert(`Upload failed: ${err.message}`);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -161,23 +166,14 @@ export default function UploadDialog({ open, onClose, onUploaded }) {
             }} 
             type="button" 
             className="px-6 py-2 rounded-md border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
-            disabled={loading}
           >
             Cancel
           </button>
             <button 
               type="submit" 
-              className="px-6 py-2 rounded-md bg-[var(--primary)] hover:bg-[var(--primary)]/90 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2" 
-              disabled={loading}
+              className="px-6 py-2 rounded-md bg-[var(--primary)] hover:bg-[var(--primary)]/90 text-white font-medium transition-colors flex items-center gap-2" 
             >
-              {loading ? (
-                <>
-                  <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></div>
-                  Uploading...
-                </>
-              ) : (
-                'Upload'
-              )}
+              Upload
             </button>
           </div>
         </form>

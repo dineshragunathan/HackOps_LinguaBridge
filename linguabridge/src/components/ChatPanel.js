@@ -137,10 +137,10 @@ export default function ChatPanel({ documentId }) {
   };
 
   return (
-    <div className="flex flex-col h-full w-full border-l bg-white min-h-0 transition-none transform-none">
+    <div className="flex flex-col h-full w-full bg-white dark:bg-gray-900 min-h-0 transition-none transform-none">
       <div className="flex-1 overflow-y-auto p-4 space-y-3 scroll-smooth min-w-0">
         {messages.length === 0 && (
-          <div className="text-center text-gray-500 py-8">
+          <div className="text-center text-gray-500 dark:text-gray-400 py-8">
             <div className="text-lg font-medium mb-2">💬 Chat with your document</div>
             <div className="text-sm">
               {documentId 
@@ -152,13 +152,13 @@ export default function ChatPanel({ documentId }) {
         )}
         
         {loading && messages.length === 0 && (
-          <div className="text-center text-[var(--fg-muted)] py-4">
+          <div className="text-center text-gray-500 dark:text-gray-400 py-4">
             Loading chat history...
           </div>
         )}
         
         {!loading && messages.length === 0 && documentId && (
-          <div className="text-center text-[var(--fg-muted)] py-4">
+          <div className="text-center text-gray-500 dark:text-gray-400 py-4">
             No previous chat history. Start a conversation!
           </div>
         )}
@@ -167,7 +167,7 @@ export default function ChatPanel({ documentId }) {
           <div
             key={msg.id}
             className={`max-w-[75%] px-4 py-2 rounded-lg break-words min-h-[44px] flex items-center transition-none ${msg.role === "assistant"
-                ? "bg-gray-100 text-gray-900 self-start"
+                ? "bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 self-start"
                 : "bg-blue-600 hover:bg-indigo-700 text-white self-end"
               }`}
           >
@@ -178,7 +178,7 @@ export default function ChatPanel({ documentId }) {
         <div ref={messagesEndRef} />
       </div>
       
-      <div className="p-3 border-t flex gap-2 bg-white min-h-[60px]">
+      <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex gap-2 bg-white dark:bg-gray-900 min-h-[60px]">
         <input
           type="text"
           placeholder={documentId ? "Ask any question about the document…" : "Upload a document first..."}
@@ -191,8 +191,8 @@ export default function ChatPanel({ documentId }) {
             }
           }}
           disabled={!documentId}
-          className={`flex-1 px-3 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
-            !documentId ? 'bg-gray-100 cursor-not-allowed' : ''
+          className={`flex-1 px-3 py-2 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+            !documentId ? 'bg-gray-100 dark:bg-gray-700 cursor-not-allowed' : ''
           }`}
         />
         <button

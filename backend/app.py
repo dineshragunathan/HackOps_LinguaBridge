@@ -51,10 +51,32 @@ def detect_document_language(file_path):
     Detect the primary language of the document by trying different OCR languages
     """
     try:
+        # Check if it's a PDF file
+        if file_path.lower().endswith('.pdf'):
+            # For PDFs, convert first page to image for language detection
+            try:
+                from pdf2image import convert_from_path
+                images = convert_from_path(file_path, dpi=150, first_page=1, last_page=1)
+                if not images:
+                    print(f"[language_detection] Failed to convert PDF to image: {file_path}")
+                    return "nep"  # Default fallback
+                
+                # Use the first page image for language detection
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                    images[0].save(tmp_file.name, 'PNG')
+                    temp_image_path = tmp_file.name
+            except Exception as e:
+                print(f"[language_detection] PDF conversion failed: {e}")
+                return "nep"  # Default fallback
+        else:
+            # For image files, use directly
+            temp_image_path = file_path
+        
         # Try different language combinations and see which gives the best results
         language_candidates = [
-            ("sin", "sin+eng"),  # Sinhala first
-            ("nep", "nep+eng"),  # Nepali second
+            ("nep", "nep+eng"),  # Nepali first (most common)
+            ("sin", "sin+eng"),  # Sinhala second
             ("eng", "eng"),      # English last
         ]
         
@@ -64,7 +86,7 @@ def detect_document_language(file_path):
         for lang_code, lang_string in language_candidates:
             try:
                 # Quick OCR test with basic config
-                test_text = pytesseract.image_to_string(file_path, lang=lang_string, config="--psm 6")
+                test_text = pytesseract.image_to_string(temp_image_path, lang=lang_string, config="--psm 6")
                 if test_text and test_text.strip():
                     # Count meaningful characters (not just numbers/symbols)
                     meaningful_chars = len([c for c in test_text if c.isalpha() or c.isspace()])
@@ -74,6 +96,13 @@ def detect_document_language(file_path):
             except Exception as e:
                 print(f"Language detection failed for {lang_string}: {e}")
                 continue
+        
+        # Clean up temporary file if we created one
+        if temp_image_path != file_path:
+            try:
+                os.unlink(temp_image_path)
+            except:
+                pass
         
         print(f"[language_detection] Detected language: {best_lang} (text length: {max_text_length})")
         return best_lang
@@ -96,12 +125,12 @@ def extract_text_from_image(image_path, lang="nep"):
         if img.mode != 'L':
             img = img.convert('L')
         
-        # Enhance contrast
+        # Ultra-conservative preprocessing for Nepali text
         enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.5)
+        img = enhancer.enhance(1.1)  # Minimal contrast enhancement
         
-        # Apply slight sharpening
-        img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=3))
+        # Skip noise reduction to preserve text details
+        # Skip sharpening to preserve original text clarity
         
         # Save the preprocessed image temporarily
         temp_path = image_path.replace('.', '_processed.')
@@ -113,22 +142,19 @@ def extract_text_from_image(image_path, lang="nep"):
     
     requested = lang or "nep"
     candidates = [
-        f"{requested}+sin+eng",
         f"{requested}+eng",
         requested,
+        f"{requested}+sin+eng",
         "script/Devanagari+eng",
+        "nep+eng",
         "sin+eng",
-        "sin",
         "eng",
     ]
     
-    # Improved OCR configurations
+    # Ultra-conservative OCR configurations for Nepali text
     configs = [
-        "--oem 1 --psm 6 -c preserve_interword_spaces=1",
-        "--oem 1 --psm 7 -c preserve_interword_spaces=1",
-        "--oem 3 --psm 6 -c preserve_interword_spaces=1",
-        "--oem 1 --psm 8",  # Single word
-        "--oem 3 --psm 7",   # Single text line
+        "--oem 3 --psm 6",  # Uniform block with LSTM (most accurate)
+        "--oem 3 --psm 7",  # Single text line with LSTM
     ]
 
     best_text = ""
@@ -158,13 +184,47 @@ def extract_text_from_image(image_path, lang="nep"):
     return best_text
 
 
+def remove_repeated_characters(text):
+    """
+    Remove lines with excessive character repetition (OCR artifacts)
+    """
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        # Skip lines with excessive repetition (more than 3 consecutive same characters)
+        if re.search(r'(.)\1{3,}', line):
+            continue
+        
+        # Skip lines that are mostly the same character (more than 60% same character)
+        if len(line.strip()) > 5:
+            char_counts = {}
+            for char in line.strip():
+                char_counts[char] = char_counts.get(char, 0) + 1
+            
+            max_count = max(char_counts.values())
+            if max_count / len(line.strip()) > 0.6:
+                continue
+        
+        # Skip lines with common OCR noise patterns
+        if re.search(r'\b(jey|ve|je|ye|ey)\b', line.lower()):
+            continue
+        
+        cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines)
+
+
 def clean_ocr_text(text, target_lang="nep"):
     """
     Clean OCR output by removing unwanted characters and artifacts
     """
     
-    # Remove common OCR artifacts
-    text = re.sub(r'[^\w\s\u0900-\u097F\u0D80-\u0DFF\n।॥]', '', text)  # Keep Nepali Devanagari and Sinhala ranges
+    # First remove repeated character patterns
+    text = remove_repeated_characters(text)
+    
+    # Remove common OCR artifacts but preserve more characters
+    text = re.sub(r'[^\w\s\u0900-\u097F\u0D80-\u0DFF\n।॥.,!?;:()]', '', text)  # Keep punctuation and more characters
     
     # Remove standalone English words that are likely OCR errors
     if target_lang in ["nep", "nepali"]:
@@ -173,11 +233,11 @@ def clean_ocr_text(text, target_lang="nep"):
         cleaned_lines = []
         
         for line in lines:
-            # If line contains mostly English words (excluding Devanagari), skip simple English words
+            # If line contains mostly English words (excluding Devanagari), be more conservative
             devanagari_chars = re.findall(r'[\u0900-\u097F]', line)
             if len(devanagari_chars) == 0:
-                # If no Devanagari characters, this might be OCR noise
-                if len(line.strip().split()) <= 2:  # Skip short English-only lines
+                # Only skip very short English-only lines that are likely noise
+                if len(line.strip().split()) <= 1:  # Only skip single word lines
                     continue
             
             # Remove standalone English words that are likely OCR errors
@@ -189,12 +249,27 @@ def clean_ocr_text(text, target_lang="nep"):
                 
                 # Skip standalone English words that are likely OCR errors
                 if not devanagari_in_word and english_in_word:
-                    # Skip common OCR noise words
-                    noise_words = ['jey', 've', 'je', 'ye', 'the', 'and', 'or', 'is', 'be']
+                    # Skip common OCR noise words (including variations)
+                    noise_words = [
+                        'jey', 've', 'je', 'ye', 'the', 'and', 'or', 'is', 'be',
+                        'jeyy', 'jeyyy', 'jeyyyy', 'jeyyyyy',  # Repeated jey variations
+                        'vey', 'veyy', 'veyyy',  # Vey variations
+                        'jey', 'jeyjey', 'jeyjeyjey',  # Jey repetitions
+                        'je', 'jeje', 'jejeje',  # Je repetitions
+                        'ye', 'yeye', 'yeyeye',  # Ye repetitions
+                        'ey', 'eyey', 'eyeyey',  # Ey repetitions
+                        'y', 'yy', 'yyy', 'yyyy', 'yyyyy',  # Y repetitions
+                        'e', 'ee', 'eee', 'eeee', 'eeeee',  # E repetitions
+                        'j', 'jj', 'jjj', 'jjjj', 'jjjjj',  # J repetitions
+                        'v', 'vv', 'vvv', 'vvvv', 'vvvvv',  # V repetitions
+                    ]
                     if word.lower() in noise_words:
                         continue
                     # Skip short English-only words (likely OCR errors)
                     if len(word) <= 3:
+                        continue
+                    # Skip words with excessive character repetition
+                    if re.search(r'(.)\1{2,}', word.lower()):  # 3+ consecutive same characters
                         continue
                 
                 filtered_words.append(word)
@@ -429,42 +504,62 @@ def upload_file():
         native_texts.append(native_text)
         translated = translate_text_to_english(native_text)
         translated_texts.append(translated)
-        native_pdf_path = None
+        original_pdf_path = None
         english_pdf_path = None
     else:
+        # Store the original PDF file
+        original_pdf_path = os.path.join(DATA_DIR, f"{doc_id}_original.pdf")
         try:
-            images = convert_from_path(file_path)
+            import shutil
+            shutil.copy2(file_path, original_pdf_path)
+            print(f"[pdf] Stored original PDF at {original_pdf_path}")
+        except Exception as e:
+            print(f"[pdf] Failed to store original PDF: {e}")
+        
+        try:
+            # Convert PDF to images with higher DPI for better OCR
+            images = convert_from_path(file_path, dpi=300)
             page_count = len(images)
+            print(f"[pdf] Converted {page_count} pages from PDF")
         except Exception as e:
             return jsonify({"error": "PDF processing failed", "details": str(e)}), 500
-        for img in images:
+        
+        for i, img in enumerate(images):
             # Use enhanced OCR extraction for PDF pages too
             import tempfile
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-                img.save(tmp_file.name)
+                img.save(tmp_file.name, 'PNG')
+                print(f"[pdf] Processing page {i+1}/{page_count} with language: {detected_lang}")
                 text = extract_text_from_image(tmp_file.name, lang=detected_lang)
                 os.unlink(tmp_file.name)
-            native_texts.append(text)
-            translated_texts.append(translate_text_to_english(text))
-        native_pdf_font = "NotoSansDevanagari-Regular.ttf"
+            
+            if text and text.strip():
+                print(f"[pdf] Extracted {len(text)} characters from page {i+1}")
+                native_texts.append(text)
+                translated_texts.append(translate_text_to_english(text))
+            else:
+                print(f"[pdf] No text extracted from page {i+1}")
+                native_texts.append("")
+                translated_texts.append("")
+        
+        # Generate translated PDF only
         english_pdf_font = ""  # Use default font for English
-        native_pdf_path = os.path.join(DATA_DIR, f"{doc_id}_native.pdf")
         english_pdf_path = os.path.join(DATA_DIR, f"{doc_id}_english.pdf")
-        all_native_text = "\n\n".join(native_texts)
         all_translated_text = "\n\n".join(translated_texts)
         try:
-            text_to_pdf(all_native_text, native_pdf_path, native_pdf_font)
             if any(t.strip() for t in translated_texts):
                 text_to_pdf(all_translated_text, english_pdf_path, english_pdf_font)
+                print(f"[pdf] Generated translated PDF at {english_pdf_path}")
         except Exception as e:
-            return jsonify({"error": "Internal error generating PDF", "details": str(e)}), 500
+            print(f"[pdf] Failed to generate translated PDF: {e}")
+            english_pdf_path = None
 
     if is_audio_file(filename):
         file_url = f"{doc_id}_native.pdf"  # Audio files are converted to PDFs
     elif ext in ["png", "jpg", "jpeg"]:
         file_url = f"{doc_id}.{ext}"
     else:
-        file_url = f"{doc_id}_native.pdf"
+        file_url = f"{doc_id}_original.pdf"  # PDFs show original file
 
     if sb_available():
         insert_document(document_id=doc_id, user_id=user_id, title=filename, file_url=file_url,
@@ -476,7 +571,7 @@ def upload_file():
         "documentId": doc_id,
         "filename": filename,
         "numPages": page_count,
-        "native_pdf_path": native_pdf_path,
+        "original_pdf_path": original_pdf_path if ext == "pdf" else None,
         "english_pdf_path": english_pdf_path,
         "file_ext": ext,
     })
@@ -485,14 +580,30 @@ def upload_file():
 @app.route("/file/<document_id>")
 def get_file(document_id):
     lang = request.args.get("lang", "native")
-    potential_pdf_path = os.path.join(DATA_DIR, f"{document_id}_{lang}.pdf")
+    
+    # Check for image files first
     potential_img_extensions = ['png', 'jpg', 'jpeg']
     for ext in potential_img_extensions:
         potential_img_path = os.path.join(UPLOAD_DIR, f"{document_id}.{ext}")
         if os.path.exists(potential_img_path):
             return send_file(potential_img_path, mimetype=f"image/{ext}", as_attachment=False)
-    if os.path.exists(potential_pdf_path):
-        return send_file(potential_pdf_path, mimetype="application/pdf", as_attachment=False)
+    
+    # For PDFs, serve original for "native" and translated for "english"
+    if lang == "native":
+        # Serve original PDF
+        original_pdf_path = os.path.join(DATA_DIR, f"{document_id}_original.pdf")
+        if os.path.exists(original_pdf_path):
+            return send_file(original_pdf_path, mimetype="application/pdf", as_attachment=False)
+    else:
+        # Serve translated PDF
+        translated_pdf_path = os.path.join(DATA_DIR, f"{document_id}_english.pdf")
+        if os.path.exists(translated_pdf_path):
+            return send_file(translated_pdf_path, mimetype="application/pdf", as_attachment=False)
+        # Fallback to original if translated doesn't exist
+        original_pdf_path = os.path.join(DATA_DIR, f"{document_id}_original.pdf")
+        if os.path.exists(original_pdf_path):
+            return send_file(original_pdf_path, mimetype="application/pdf", as_attachment=False)
+    
     return jsonify({"error": "File not found"}), 404
 
 
@@ -588,6 +699,17 @@ def get_metadata(document_id):
         return jsonify({"error": "Document not found"}), 404
     native_text = "\n\n".join(t["original_text"] for t in translations if t["original_text"])
     translated_text = "\n\n".join(t["translated_text"] for t in translations if t["translated_text"])
+    
+    # Enhanced debug logging
+    print(f"[Metadata] Document ID: {document_id}")
+    print(f"[Metadata] Found {len(translations)} translation records")
+    print(f"[Metadata] Translation records:")
+    for i, t in enumerate(translations):
+        print(f"  Record {i}: page={t.get('page_number', 'N/A')}, text_len={len(t.get('translated_text', ''))}")
+        print(f"    Text preview: {t.get('translated_text', '')[:100]}...")
+    print(f"[Metadata] Combined text length: {len(translated_text)}")
+    print(f"[Metadata] First 200 chars: {translated_text[:200]}")
+    
     return jsonify({
         "filename": doc_meta["title"],
         "fileExt": doc_meta["file_url"].split(".")[-1].lower(),
@@ -786,6 +908,84 @@ def delete_user_document_endpoint(document_id):
     except Exception as e:
         print(f"Delete document error: {e}")
         return jsonify({"error": "Failed to delete document", "details": str(e)}), 500
+
+
+@app.route('/download/pdf/<document_id>', methods=['GET'])
+def download_translation_pdf(document_id):
+    """Download translated text as PDF"""
+    try:
+        if not sb_available():
+            return jsonify({"error": "Database not available"}), 500
+            
+        # Get document metadata
+        doc_meta = get_document_metadata(document_id)
+        if not doc_meta:
+            return jsonify({"error": "Document not found"}), 404
+        
+        # Use the exact same method as metadata endpoint
+        translations = get_translations_for_document(document_id)
+        if not translations:
+            return jsonify({"error": "No translations found"}), 404
+        
+        # Use identical logic to metadata endpoint
+        translated_text = "\n\n".join(t["translated_text"] for t in translations if t["translated_text"])
+        
+        # Enhanced debug logging
+        print(f"[PDF Download] Document ID: {document_id}")
+        print(f"[PDF Download] Found {len(translations)} translation records")
+        print(f"[PDF Download] Translation records:")
+        for i, t in enumerate(translations):
+            print(f"  Record {i}: page={t.get('page_number', 'N/A')}, text_len={len(t.get('translated_text', ''))}")
+            print(f"    Text preview: {t.get('translated_text', '')[:100]}...")
+        print(f"[PDF Download] Combined text length: {len(translated_text)}")
+        print(f"[PDF Download] First 200 chars: {translated_text[:200]}")
+        
+        if not translated_text.strip():
+            return jsonify({"error": "No translated content available"}), 404
+        
+        # Create PDF with translated text
+        pdf_filename = f"{document_id}_download.pdf"
+        pdf_path = os.path.join(DATA_DIR, pdf_filename)
+        text_to_pdf(translated_text, pdf_path, None)  # None for font_path uses default Arial
+        
+        if os.path.exists(pdf_path):
+            return send_file(pdf_path, as_attachment=True, download_name=f"translation_{document_id}.pdf")
+        else:
+            return jsonify({"error": "Failed to generate PDF"}), 500
+            
+    except Exception as e:
+        print(f"Error downloading PDF: {e}")
+        return jsonify({"error": "Failed to download PDF"}), 500
+
+
+@app.route('/debug/translations/<document_id>', methods=['GET'])
+def debug_translations(document_id):
+    """Debug endpoint to see exactly what translation data exists"""
+    try:
+        if not sb_available():
+            return jsonify({"error": "Database not available"}), 500
+            
+        # Get document metadata
+        doc_meta = get_document_metadata(document_id)
+        if not doc_meta:
+            return jsonify({"error": "Document not found"}), 404
+        
+        # Get translations for the document
+        translations = get_translations_for_document(document_id)
+        
+        # Return detailed information
+        return jsonify({
+            "document_id": document_id,
+            "document_meta": doc_meta,
+            "translations_count": len(translations),
+            "translations": translations,
+            "combined_translated_text": "\n\n".join(t["translated_text"] for t in translations if t["translated_text"]),
+            "combined_native_text": "\n\n".join(t["original_text"] for t in translations if t["original_text"])
+        })
+        
+    except Exception as e:
+        print(f"Debug translations error: {e}")
+        return jsonify({"error": "Debug failed"}), 500
 
 
 if __name__ == "__main__":
