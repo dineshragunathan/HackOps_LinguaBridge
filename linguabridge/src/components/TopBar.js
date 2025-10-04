@@ -2,12 +2,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Upload, Plus, Moon, Sun, LogOut, User } from "lucide-react";
+import { Upload, Plus, Moon, Sun, LogOut, User, MessageSquare } from "lucide-react";
 import UploadDialog from "@/components/UploadDialog";
+import FeedbackDialog from "@/components/FeedbackDialog";
 import { useUser } from "@/contexts/UserContext";
 
 export default function TopBar({ onUploadComplete, viewLang, setViewLang }) {
   const [open, setOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [dark, setDark] = useState(
     typeof window !== "undefined" && document.documentElement.classList.contains("dark")
   );
@@ -54,6 +56,16 @@ export default function TopBar({ onUploadComplete, viewLang, setViewLang }) {
       <div className="flex items-center gap-3 shrink-0">
         <div className="px-2 py-1 text-sm rounded-md bg-white/60 dark:bg-black/40 whitespace-nowrap">EN</div>
         
+        {/* Feedback Button */}
+        <button
+          onClick={() => setFeedbackOpen(true)}
+          className="inline-flex items-center gap-1 px-3 py-1 text-sm rounded-md bg-green-600 hover:bg-green-700 text-white whitespace-nowrap"
+          title="Send Feedback"
+        >
+          <MessageSquare size={14} />
+          Feedback
+        </button>
+        
         {user && (
           <div className="flex items-center gap-2 px-2 py-1 text-sm rounded-md bg-white/60 dark:bg-black/40">
             <User size={14} />
@@ -86,6 +98,11 @@ export default function TopBar({ onUploadComplete, viewLang, setViewLang }) {
           setOpen(false);
           onUploadComplete && onUploadComplete(meta);
         }}
+      />
+      
+      <FeedbackDialog
+        open={feedbackOpen}
+        onClose={() => setFeedbackOpen(false)}
       />
     </header>
   );

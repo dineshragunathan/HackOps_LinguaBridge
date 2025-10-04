@@ -11,7 +11,12 @@ supabase==2.5.0
 # OCR + PDF processing
 pdf2image==1.17.0
 pytesseract==0.3.13
-Pillow==10.3.0  # works with Python 3.13
+Pillow>=10.4.0  # Updated for Python 3.13 compatibility
+
+# Audio processing
+openai-whisper==20231117
+librosa==0.10.1
+soundfile==0.12.1
 
 # Utils
 python-dotenv==1.0.1

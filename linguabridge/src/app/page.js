@@ -30,6 +30,11 @@ export default function Home() {
 
   // Function to fetch document metadata
   const fetchDocumentMetadata = async (docId) => {
+    if (!docId || docId === 'undefined') {
+      console.error("Invalid document ID:", docId);
+      return null;
+    }
+    
     try {
       const response = await fetch(`${BACKEND}/metadata/${docId}`);
       if (response.ok) {
@@ -128,16 +133,22 @@ export default function Home() {
           setViewLang={setViewLang}
           onUploadComplete={async (meta) => {
             const docId = meta.documentId || meta.id || meta.name;
-            setDocumentId(docId);
-            setFilename(meta.filename || meta.name || "Document");
-            setPageNumber(1);
-            setZoom(1);
             
-            // Fetch metadata including translated text
-            await fetchDocumentMetadata(docId);
-            
-            // Refresh user documents list
-            await fetchUserDocuments();
+            // Only proceed if we have a valid document ID
+            if (docId && docId !== 'undefined') {
+              setDocumentId(docId);
+              setFilename(meta.filename || meta.name || "Document");
+              setPageNumber(1);
+              setZoom(1);
+              
+              // Fetch metadata including translated text
+              await fetchDocumentMetadata(docId);
+              
+              // Refresh user documents list
+              await fetchUserDocuments();
+            } else {
+              console.error("Upload completed but no valid document ID received:", meta);
+            }
           }}
         />
       </div>

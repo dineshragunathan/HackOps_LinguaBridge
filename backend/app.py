@@ -6,15 +6,20 @@ import os
 import re
 import uuid
 from datetime import datetime
+import time
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from pdf2image import convert_from_path
 import pytesseract
 from fpdf import FPDF
+import whisper
+import librosa
+import soundfile as sf
 from translate import translate_text_to_english, generate_chat_response
 from supabase_client import (
     sb_available,
+    supabase,
     insert_document,
     insert_translation,
     get_translations_for_document,
@@ -32,7 +37,7 @@ CORS(app)
 
 UPLOAD_DIR = "tmp_uploads"
 DATA_DIR = "data"
-ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
+ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "mp3", "wav", "m4a", "flac", "ogg"}
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -109,7 +114,7 @@ def extract_text_from_image(image_path, lang="nep"):
     requested = lang or "nep"
     candidates = [
         f"{requested}+sin+eng",
-        f"{requested}+eng", 
+        f"{requested}+eng",
         requested,
         "script/Devanagari+eng",
         "sin+eng",
@@ -120,7 +125,7 @@ def extract_text_from_image(image_path, lang="nep"):
     # Improved OCR configurations
     configs = [
         "--oem 1 --psm 6 -c preserve_interword_spaces=1",
-        "--oem 1 --psm 7 -c preserve_interword_spaces=1", 
+        "--oem 1 --psm 7 -c preserve_interword_spaces=1",
         "--oem 3 --psm 6 -c preserve_interword_spaces=1",
         "--oem 1 --psm 8",  # Single word
         "--oem 3 --psm 7",   # Single text line
@@ -128,7 +133,7 @@ def extract_text_from_image(image_path, lang="nep"):
 
     best_text = ""
     max_reasonable_length = 0
-    
+
     for langs in candidates:
         for cfg in configs:
             try:
@@ -272,6 +277,69 @@ def text_to_pdf(text, output_path, font_path):
     pdf.output(output_path)
 
 
+def is_audio_file(filename):
+    """Check if the file is an audio file"""
+    audio_extensions = {"mp3", "wav", "m4a", "flac", "ogg"}
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in audio_extensions
+
+
+def transcribe_audio(file_path):
+    """
+    Transcribe audio file to text using Whisper
+    """
+    try:
+        # Load Whisper model (base model for good balance of speed/accuracy)
+        # Handle SSL certificate issues
+        import ssl
+        ssl._create_default_https_context = ssl._create_unverified_context
+        
+        model = whisper.load_model("base")
+        
+        # Transcribe the audio
+        result = model.transcribe(file_path)
+        
+        # Extract text from result
+        text = result["text"].strip()
+        
+        if not text:
+            return None, "No speech detected in audio file"
+        
+        return text, None
+        
+    except Exception as e:
+        return None, f"Error transcribing audio: {str(e)}"
+
+
+def detect_audio_language(file_path):
+    """
+    Detect the language of the audio content
+    """
+    try:
+        # Handle SSL certificate issues
+        import ssl
+        ssl._create_default_https_context = ssl._create_unverified_context
+        
+        model = whisper.load_model("base")
+        result = model.transcribe(file_path)
+        
+        # Get detected language
+        detected_lang = result.get("language", "unknown")
+        
+        # Map Whisper language codes to our language names
+        lang_mapping = {
+            "si": "sinhala",  # Sinhala
+            "ne": "nepali",   # Nepali
+            "en": "english",  # English
+            "hi": "nepali",   # Hindi (treat as Nepali for our purposes)
+        }
+        
+        return lang_mapping.get(detected_lang, "unknown")
+        
+    except Exception as e:
+        print(f"Error detecting audio language: {e}")
+        return "unknown"
+
+
 @app.route("/upload", methods=["POST"])
 def upload_file():
     user_id = request.form.get("user_id")
@@ -291,14 +359,68 @@ def upload_file():
 
     page_count = 1
     
-    # Detect the document language
-    detected_lang = detect_document_language(file_path)
+    # Detect the document language (skip for audio files)
+    if is_audio_file(filename):
+        detected_lang = "unknown"  # Will be detected later by Whisper
+    else:
+        detected_lang = detect_document_language(file_path)
     language = detected_lang
 
     native_texts = []
     translated_texts = []
 
-    if ext in ["png", "jpg", "jpeg"]:
+    # Initialize PDF paths for all file types
+    native_pdf_path = os.path.join(DATA_DIR, f"{doc_id}_native.pdf")
+    english_pdf_path = os.path.join(DATA_DIR, f"{doc_id}_english.pdf")
+    
+    if is_audio_file(filename):
+        # Handle audio files
+        print(f"Processing audio file: {filename}")
+        
+        try:
+            # Transcribe audio to text
+            print(f"[audio] Starting transcription for {filename}")
+            native_text, error = transcribe_audio(file_path)
+            if error:
+                print(f"[audio] Transcription error: {error}")
+                return jsonify({"error": f"Audio transcription failed: {error}"}), 500
+            
+            if not native_text.strip():
+                print(f"[audio] No speech detected in {filename}")
+                return jsonify({"error": "No speech detected in audio file"}), 400
+            
+            print(f"[audio] Transcription successful: {len(native_text)} characters")
+            
+            # Detect audio language
+            print(f"[audio] Detecting language for {filename}")
+            audio_lang = detect_audio_language(file_path)
+            language = audio_lang
+            print(f"[audio] Detected language: {audio_lang}")
+            
+            native_texts.append(native_text)
+            translated = translate_text_to_english(native_text)
+            translated_texts.append(translated)
+            print(f"[audio] Translation successful: {len(translated)} characters")
+            
+        except Exception as e:
+            print(f"[audio] Error processing audio file: {e}")
+            return jsonify({"error": f"Audio processing failed: {str(e)}"}), 500
+        
+        # Generate PDFs for audio transcription
+        try:
+            native_pdf_font = "NotoSansDevanagari-Regular.ttf" if language in ["nepali", "sinhala"] else ""
+            english_pdf_font = ""  # Use default font for English
+            
+            print(f"[audio] Generating PDFs for {filename}")
+            text_to_pdf(native_text, native_pdf_path, native_pdf_font)
+            if translated.strip():
+                text_to_pdf(translated, english_pdf_path, english_pdf_font)
+            print(f"[audio] PDFs generated successfully")
+        except Exception as e:
+            print(f"[audio] PDF generation error: {e}")
+            return jsonify({"error": "Internal error generating PDF", "details": str(e)}), 500
+            
+    elif ext in ["png", "jpg", "jpeg"]:
         # Use detected language for OCR
         native_text = extract_text_from_image(file_path, lang=detected_lang)
         if not native_text.strip():
@@ -337,7 +459,12 @@ def upload_file():
         except Exception as e:
             return jsonify({"error": "Internal error generating PDF", "details": str(e)}), 500
 
-    file_url = f"{doc_id}.{ext}" if ext in ["png", "jpg", "jpeg"] else f"{doc_id}_native.pdf"
+    if is_audio_file(filename):
+        file_url = f"{doc_id}_native.pdf"  # Audio files are converted to PDFs
+    elif ext in ["png", "jpg", "jpeg"]:
+        file_url = f"{doc_id}.{ext}"
+    else:
+        file_url = f"{doc_id}_native.pdf"
 
     if sb_available():
         insert_document(document_id=doc_id, user_id=user_id, title=filename, file_url=file_url,
@@ -367,6 +494,88 @@ def get_file(document_id):
     if os.path.exists(potential_pdf_path):
         return send_file(potential_pdf_path, mimetype="application/pdf", as_attachment=False)
     return jsonify({"error": "File not found"}), 404
+
+
+@app.route("/feedback", methods=["POST"])
+def submit_feedback():
+    """Submit user feedback"""
+    try:
+        data = request.get_json()
+        user_id = data.get("user_id")
+        feedback_text = data.get("feedback_text")
+        feedback_type = data.get("feedback_type", "general")
+        rating = data.get("rating")
+        
+        if not user_id or not feedback_text:
+            return jsonify({"error": "Missing required fields"}), 400
+        
+        if len(feedback_text.strip()) < 10:
+            return jsonify({"error": "Feedback must be at least 10 characters long"}), 400
+        
+        if rating and (rating < 1 or rating > 5):
+            return jsonify({"error": "Rating must be between 1 and 5"}), 400
+        
+        # Insert feedback into Supabase
+        if sb_available():
+            try:
+                result = supabase.table("feedback").insert({
+                    "user_id": user_id,
+                    "feedback_text": feedback_text.strip(),
+                    "feedback_type": feedback_type,
+                    "rating": rating
+                }).execute()
+                
+                if result.data:
+                    return jsonify({
+                        "success": True,
+                        "message": "Feedback submitted successfully",
+                        "feedback_id": result.data[0]["id"]
+                    })
+                else:
+                    return jsonify({"error": "Failed to save feedback"}), 500
+                    
+            except Exception as e:
+                print(f"Supabase feedback error: {e}")
+                return jsonify({"error": "Database error"}), 500
+        else:
+            return jsonify({"error": "Database not available"}), 500
+            
+    except Exception as e:
+        print(f"Feedback submission error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route("/feedback/<user_id>", methods=["GET"])
+def get_user_feedback(user_id):
+    """Get feedback submitted by a specific user"""
+    try:
+        if not user_id:
+            return jsonify({"error": "User ID required"}), 400
+        
+        if sb_available():
+            try:
+                result = supabase.table("feedback").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+                
+                if result.data:
+                    return jsonify({
+                        "success": True,
+                        "feedback": result.data
+                    })
+                else:
+                    return jsonify({
+                        "success": True,
+                        "feedback": []
+                    })
+                    
+            except Exception as e:
+                print(f"Supabase feedback fetch error: {e}")
+                return jsonify({"error": "Database error"}), 500
+        else:
+            return jsonify({"error": "Database not available"}), 500
+            
+    except Exception as e:
+        print(f"Get feedback error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route("/metadata/<document_id>")

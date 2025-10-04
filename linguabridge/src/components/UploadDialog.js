@@ -48,12 +48,28 @@ export default function UploadDialog({ open, onClose, onUploaded }) {
       fd.append("user_id", userId);
 
       const res = await fetch(`${BACKEND}/upload`, { method: "POST", body: fd });
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
+        console.error("Upload failed:", res.status, errorData);
+        alert(`Upload failed: ${errorData.error || res.statusText}`);
+        return;
+      }
+      
       const json = await res.json();
+      console.log("Upload response:", json);
+      
+      if (!json.documentId) {
+        console.error("No document ID in response:", json);
+        alert("Upload completed but no document ID received");
+        return;
+      }
+      
       setSelectedFile(null); // Clear selected file after upload
       onUploaded && onUploaded(json);
     } catch (err) {
-      console.error(err);
-      alert("Upload failed");
+      console.error("Upload error:", err);
+      alert(`Upload failed: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -98,7 +114,7 @@ export default function UploadDialog({ open, onClose, onUploaded }) {
         >
           <h3 className="text-xl font-semibold mb-3 text-center">Upload Document</h3>
           <p className="text-sm text-[var(--fg-muted)] mb-6 text-center">
-            Upload PDF or image files (Nepali/Sinhala). We&apos;ll OCR and translate them automatically.
+            Upload PDF, image, or audio files (Nepali/Sinhala). We&apos;ll OCR/transcribe and translate them automatically.
           </p>
           
           {/* Drop zone area */}
@@ -110,7 +126,7 @@ export default function UploadDialog({ open, onClose, onUploaded }) {
             <input 
               ref={inputRef} 
               type="file" 
-              accept=".pdf,image/*" 
+              accept=".pdf,image/*,audio/*,.mp3,.wav,.m4a,.flac,.ogg" 
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
               onChange={handleFileChange}
             />
@@ -124,7 +140,7 @@ export default function UploadDialog({ open, onClose, onUploaded }) {
                   : 'Click to browse or drag & drop files here'
                 }
               </p>
-              <p className="text-xs text-gray-400 mt-1">PDF, PNG, JPG, JPEG supported</p>
+              <p className="text-xs text-gray-400 mt-1">PDF, PNG, JPG, JPEG, MP3, WAV, M4A, FLAC, OGG supported</p>
             </div>
           </div>
           
